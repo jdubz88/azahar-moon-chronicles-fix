@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Moonfix: unofficial build, named so it can be told apart from the official Azahar app -->
+    <string name="app_name" translatable="false">Azahar Moonfix</string>
+</resources>

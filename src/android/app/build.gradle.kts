@@ -21,7 +21,7 @@ plugins {
  * next 680 years.
  */
 val autoVersion = (((System.currentTimeMillis() / 1000) - 1451606400) / 10).toInt()
-val abiFilter = listOf("arm64-v8a", "x86_64")
+val abiFilter = listOf("arm64-v8a") // Moonfix: arm64 only, to keep CI build times down
 
 val downloadedJniLibsPath = "${layout.buildDirectory.get().asFile.path}/downloadedJniLibs"
 
@@ -64,6 +64,7 @@ android {
         // The application ID refers to Lime3DS to allow for
         // the Play Store listing, which was originally set up for Lime3DS, to still be used.
         applicationId = "org.azahar_emu.azahar"
+        applicationIdSuffix = ".moonfix" // Moonfix: installs next to the official app
         minSdk = 29
         targetSdk = 37
         versionCode = autoVersion
