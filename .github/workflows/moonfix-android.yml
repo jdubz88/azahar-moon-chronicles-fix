@@ -1,0 +1,44 @@
+# Moonfix: builds the unofficial Azahar Moonfix APK (googlePlay flavor, release build, arm64).
+# Run it from the Actions tab or with: gh workflow run moonfix-android.yml -f version_name=...
+# The steps follow the android job in build.yml. Without a signing key in the repository
+# secrets, the release build is signed with the runner's generated debug key.
+name: moonfix-android
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "Version name shown in the app"
+        required: true
+        default: "2127.0-rc3-moonfix1"
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      GIT_TAG_NAME: ${{ inputs.version_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Update Android SDK CMake version
+        run: echo "y" | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager "cmake;3.30.3"
+      - name: Build
+        run: |
+          export JAVA_HOME=$JAVA_HOME_17_X64
+          cd src/android
+          chmod +x ./gradlew
+          ./gradlew assembleGooglePlayRelease
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp src/android/app/build/outputs/apk/googlePlay/release/app-googlePlay-release.apk \
+             "out/azahar-moonfix-${GIT_TAG_NAME}-android-arm64.apk"
+          cd out && sha256sum *.apk | tee SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: azahar-moonfix-android
+          path: out/
