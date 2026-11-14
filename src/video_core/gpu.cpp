@@ -16,6 +16,7 @@
 #include "video_core/gpu_impl.h"
 #include "video_core/pica/pica_core.h"
 #include "video_core/pica/regs_lcd.h"
+#include "video_core/rasterizer_cache/moonfix.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_software/sw_blitter.h"
 #include "video_core/right_eye_disabler.h"
@@ -460,6 +461,10 @@ void GPU::ApplyPerProgramSettings(u64 program_ID) {
         }
     }
     impl->rasterizer->SetAccurateMul(use_accurate_mul);
+
+    // Moonfix: Moon Chronicles (USA) only, see moonfix.h.
+    VideoCore::g_skip_layout_mismatch_validation.store(program_ID == 0x000400000012E700ULL,
+                                                       std::memory_order_relaxed);
 }
 
 void GPU::SubmitCmdList(u32 index) {

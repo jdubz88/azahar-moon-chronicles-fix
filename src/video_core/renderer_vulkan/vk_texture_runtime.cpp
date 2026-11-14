@@ -227,7 +227,7 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
 
     image = vk::Image{unsafe_image};
 
-    const vk::ImageViewCreateInfo view_info = {
+    vk::ImageViewCreateInfo view_info = {
         .image = image,
         .viewType = is_cube_map ? vk::ImageViewType::eCube : vk::ImageViewType::e2D,
         .format = format,
@@ -239,8 +239,14 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
             .layerCount = VK_REMAINING_ARRAY_LAYERS,
         },
     };
+    const bool swizzle_alpha = opaque_alpha && format == vk::Format::eR8G8B8A8Unorm;
+    if (swizzle_alpha) {
+        // Moonfix: sample alpha as 1.0. The framebuffer (Mip0) view must keep the identity
+        // mapping, so it is not aliased to this view and gets created on demand instead.
+        view_info.components.a = vk::ComponentSwizzle::eOne;
+    }
     image_views[ViewType::Sample] = instance.GetDevice().createImageView(view_info);
-    if (levels == 1) {
+    if (levels == 1 && !swizzle_alpha) {
         image_views[ViewType::Mip0] = image_views[ViewType::Sample];
     }
 
@@ -781,6 +787,17 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
     }
 
     const vk::Format format = traits.native;
+
+    // Moonfix: RGB8 and RGB565 have no alpha channel on the 3DS, so sampling them must return
+    // alpha = 1.0. When they are backed by RGBA8 (always the case for RGB8 here), a blit from an
+    // RGBA8 surface (display transfer) would otherwise leave the source's alpha in the texture.
+    if ((pixel_format == VideoCore::PixelFormat::RGB8 ||
+         pixel_format == VideoCore::PixelFormat::RGB565) &&
+        format == vk::Format::eR8G8B8A8Unorm) {
+        for (auto& handle : handles) {
+            handle.opaque_alpha = true;
+        }
+    }
 
     ASSERT_MSG(format != vk::Format::eUndefined && levels >= 1,
                "Image allocation parameters are invalid");

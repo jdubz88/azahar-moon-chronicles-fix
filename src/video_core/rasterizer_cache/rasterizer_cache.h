@@ -16,6 +16,7 @@
 #include "video_core/custom_textures/custom_tex_manager.h"
 #include "video_core/pica/regs_external.h"
 #include "video_core/pica/regs_internal.h"
+#include "video_core/rasterizer_cache/moonfix.h"
 #include "video_core/rasterizer_cache/rasterizer_cache_base.h"
 #include "video_core/rasterizer_cache/surface_base.h"
 #include "video_core/renderer_base.h"
@@ -1356,7 +1357,13 @@ bool RasterizerCache<T>::ValidateByReinterpretation(Surface& surface, SurfacePar
         return false;
     }
 
-    return slot_surfaces[it->second].stride != surface.stride;
+    const SurfaceParams& owner = slot_surfaces[it->second];
+    if (owner.stride != surface.stride) {
+        return true;
+    }
+    // Moonfix: optionally treat a tiled/linear layout mismatch the same way (see moonfix.h).
+    return g_skip_layout_mismatch_validation.load(std::memory_order_relaxed) &&
+           owner.is_tiled != surface.is_tiled;
 }
 
 template <class T>

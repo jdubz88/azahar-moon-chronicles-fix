@@ -56,7 +56,7 @@ struct Handle {
     Handle(Handle&& other) noexcept
         : instance(other.instance), allocation(std::exchange(other.allocation, VK_NULL_HANDLE)),
           image(std::exchange(other.image, VK_NULL_HANDLE)),
-          image_views(std::exchange(other.image_views, {})),
+          image_views(std::exchange(other.image_views, {})), opaque_alpha(other.opaque_alpha),
           framebuffer(std::exchange(other.framebuffer, VK_NULL_HANDLE)),
           width(std::exchange(other.width, 0)), height(std::exchange(other.height, 0)),
           levels(std::exchange(other.levels, 0)), layers(std::exchange(other.layers, 0)) {}
@@ -70,6 +70,7 @@ struct Handle {
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
         image = std::exchange(other.image, VK_NULL_HANDLE);
         image_views = std::exchange(other.image_views, {});
+        opaque_alpha = other.opaque_alpha;
         framebuffer = std::exchange(other.framebuffer, VK_NULL_HANDLE);
         width = std::exchange(other.width, 0);
         height = std::exchange(other.height, 0);
@@ -95,6 +96,9 @@ struct Handle {
     VmaAllocation allocation{VK_NULL_HANDLE};
     vk::Image image{VK_NULL_HANDLE};
     std::array<vk::ImageView, ViewType::Max> image_views{};
+    /// Moonfix: the guest format has no alpha channel but the backing image does (e.g. RGB8
+    /// stored as RGBA8), so the sampling view must read alpha as one, like the real hardware.
+    bool opaque_alpha{false};
     vk::Framebuffer framebuffer{VK_NULL_HANDLE};
     u32 width{};
     u32 height{};

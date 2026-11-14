@@ -93,7 +93,8 @@ static constexpr std::array<FormatTuple, 8> CUSTOM_TUPLES = {{
 }
 
 [[nodiscard]] OGLTexture MakeHandle(GLenum target, u32 width, u32 height, u32 levels, u32 samples,
-                                    const FormatTuple& tuple, std::string_view debug_name = "") {
+                                    const FormatTuple& tuple, std::string_view debug_name = "",
+                                    bool opaque_alpha = false) {
     OGLTexture texture{};
     texture.Create();
 
@@ -111,11 +112,22 @@ static constexpr std::array<FormatTuple, 8> CUSTOM_TUPLES = {{
     glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    if (opaque_alpha && samples <= 1) {
+        // Moonfix: the guest format has no alpha channel but the backing texture does (RGB8 is
+        // stored as RGBA8 on OpenGL ES), so sampling must return alpha = 1.0 like the hardware.
+        glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+    }
+
     if (!debug_name.empty()) {
         glObjectLabel(GL_TEXTURE, texture.handle, debug_name.size(), debug_name.data());
     }
 
     return texture;
+}
+
+/// Moonfix: true when a surface of this guest format must sample alpha as one.
+[[nodiscard]] bool NeedsOpaqueAlpha(PixelFormat format, const FormatTuple& tuple) {
+    return format == PixelFormat::RGB8 && tuple.internal_format == GL_RGBA8;
 }
 
 } // Anonymous namespace
@@ -387,10 +399,12 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
     const GLenum target =
         texture_type == VideoCore::TextureType::CubeMap ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
 
-    textures[0] = MakeHandle(target, width, height, levels, 1, tuple, DebugName(false));
+    const bool opaque_alpha = NeedsOpaqueAlpha(pixel_format, tuple);
+    textures[0] =
+        MakeHandle(target, width, height, levels, 1, tuple, DebugName(false), opaque_alpha);
     if (res_scale != 1) {
         textures[1] = MakeHandle(target, GetScaledWidth(), GetScaledHeight(), levels, 1, tuple,
-                                 DebugName(true, false));
+                                 DebugName(true, false), opaque_alpha);
     }
 
     if (sample_count > 1) {
@@ -444,7 +458,7 @@ GLuint Surface::CopyHandle() noexcept {
 
     if (!copy_texture.handle) {
         copy_texture = MakeHandle(GL_TEXTURE_2D, GetScaledWidth(), GetScaledHeight(), levels, 1,
-                                  tuple, DebugName(true));
+                                  tuple, DebugName(true), NeedsOpaqueAlpha(pixel_format, tuple));
     }
 
     for (u32 level = 0; level < levels; level++) {
@@ -647,7 +661,7 @@ void Surface::ScaleUp(u32 new_scale, u8 new_sample_count) {
     if (res_scale_modified && new_scale > 1) {
         res_scale = new_scale;
         textures[1] = MakeHandle(GL_TEXTURE_2D, GetScaledWidth(), GetScaledHeight(), levels, 1,
-                                 tuple, DebugName(true));
+                                 tuple, DebugName(true), NeedsOpaqueAlpha(pixel_format, tuple));
         for (u32 level = 0; level < levels; level++) {
             const VideoCore::TextureBlit blit = {
                 .src_level = level,
