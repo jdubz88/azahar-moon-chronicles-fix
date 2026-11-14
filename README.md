@@ -1,3 +1,15 @@
+> [!IMPORTANT]
+> **This is an unofficial fork of Azahar with one fix, and it is not affiliated with the Azahar project.**
+> In Azahar on Android, the 3D view of the 3DS game **Moon Chronicles** breaks into repeated horizontal bands. This fork makes it render correctly and run at full speed. Everything else is upstream Azahar 2127.0-rc3.
+>
+> - Download: [latest release](https://github.com/jdubz88/azahar-moon-chronicles-fix/releases/latest) (Android, arm64, installs next to the official app)
+> - What was wrong and how it is fixed: [MOONFIX.md](MOONFIX.md)
+> - The patch on its own: [moonfix/](moonfix/)
+>
+> Please don't report problems with this build to the Azahar project. The upstream README follows.
+
+---
+
 ![Azahar Emulator](https://azahar-emu.org/resources/images/logo/azahar-name-and-logo.svg)
 
 ![Current Release](https://img.shields.io/github/v/release/azahar-emu/azahar?label=Current%20Release)

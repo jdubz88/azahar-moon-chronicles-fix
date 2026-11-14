@@ -1,0 +1,35 @@
+Moon Chronicles (USA) on Azahar 2127.0-rc3, Android, Vulkan: one frame in the first room of Episode 1.
+Lines from an instrumented build (logging added around display transfers, draws and surface
+validation; the logging code is not part of this fork). The first number is seconds since boot.
+
+Field meanings
+  fmt / in_fmt / out_fmt / cfmt   3DS pixel format: 0 = RGBA8, 1 = RGB8
+  dfmt=17                         depth format D24S8
+  tiled=true|false                surface memory layout (tiled 8x8 blocks or linear rows)
+  DISPXFER scaling=1              display transfer with horizontal downscale (512 -> 256 wide)
+  tex0=ADDR/WxH/f1                texture unit 0: address, size, format 1 = RGB8
+  atest=1 func=6 ref=7            alpha test on, function GreaterThan, reference 7
+  REINTERP-SKIP? ... skip_upload  decision of RasterizerCache::ValidateByReinterpretation
+  DOWNLOAD                        GPU readback of a surface into emulated memory
+
+Without the fix (official behaviour):
+71.326229 DISPXFER in=0x18038400 out=0x18470400 in=512x512 out=512x512 in_fmt=0 out_fmt=0 flip=0 in_linear=0 crop=0 dont_swizzle=0 blk32=1 scaling=1 flags=0x1010000 accel=true
+71.329243 DISPXFER in=0x18470400 out=0x18038400 in=256x512 out=256x512 in_fmt=0 out_fmt=1 flip=0 in_linear=1 crop=0 dont_swizzle=0 blk32=0 scaling=0 flags=0x1002 accel=true
+71.329314 DRAW fb color=0x18470400 depth=0x180b8400 256x416 cfmt=0 dfmt=17 use_c=true use_d=false vp=[0,0,240,400] flipped=false tex0=0x18038400/256x512/f1/wrap2,2
+71.329339 REINTERP-SKIP? surface addr=0x18470400 256x416 stride=256 fmt=0 type=0 tiled=true | dirty owner addr=0x18470400 256x512 stride=256 fmt=0 type=0 tiled=false | interval 0x18474400-0x184d8200 -> skip_upload=false
+71.329342 DOWNLOAD surface addr=0x18470400 256x512 stride=256 fmt=0 type=0 tiled=false | part addr=0x18474400 256x400
+71.339998 REINTERP-SKIP? surface addr=0x18470400 256x416 stride=256 fmt=0 type=0 tiled=true | dirty owner addr=0x18470400 256x512 stride=256 fmt=0 type=0 tiled=false | interval 0x18470400-0x18474400 -> skip_upload=false
+71.340001 DOWNLOAD surface addr=0x18470400 256x512 stride=256 fmt=0 type=0 tiled=false | part addr=0x18470400 256x16
+
+The same draw with its pipeline state (logged in a later run, before the speed fix):
+71.355235 DRAW fb color=0x18470400 depth=0x180b8400 256x416 cfmt=0 dfmt=17 use_c=true use_d=false vp=[0,0,240,400] flipped=false tex0=0x18038400/256x512/f1/wrap2,2 | blend_en=1 eq=0/0 src=1/0 dst=0/0 atest=1 func=6 ref=7 wmask=r1g1b1a1 | tev0=0xe030e03/0x0/0x10001/0xffffffff tev1=0xfff0fff/0x0/0x0/0xfffffff tev2=0xfff0fff/0x0/0x0/0x0 tev3=0xfff0fff/0x0/0x0/0xfffffff tev4=0xfff0fff/0x0/0x0/0xfffffff tev5=0xfff0fff/0x0/0x0/0xfffffff
+
+Reading
+  1. DISPXFER 1: scene 0x18038400 (512x512 RGBA8, tiled) -> 0x18470400 (256x512 RGBA8, linear).
+  2. DISPXFER 2: 0x18470400 (linear RGBA8) -> 0x18038400 (256x512 RGB8, tiled). On Android the RGB8
+     surface is an RGBA8 texture, so the source alpha (about 0) is copied into it.
+  3. DRAW: full-screen quad into the framebuffer at 0x18470400 (256x416 RGBA8, tiled), sampling the
+     RGB8 texture with the alpha test "alpha > 7". Alpha is about 0, so every fragment is discarded.
+  4. REINTERP-SKIP? / DOWNLOAD: before drawing, the cache refreshes the tiled framebuffer from the
+     linear buffer that shares its memory (same stride, so no skip): a GPU readback plus upload,
+     every frame. That linear picture shown as tiled data is the horizontal banding.

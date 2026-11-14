@@ -1,0 +1,270 @@
+From 49803d16ca2eb739fbcbe22b93cd0506ab8b2a21 Mon Sep 17 00:00:00 2001
+From: jdubz88 <104123059+jdubz88@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 20:59:03 -0800
+Subject: [PATCH] video_core: fix Moon Chronicles rendering on Android
+
+Moon Chronicles (USA, 000400000012E700) copies its rendered scene into an
+RGB8 texture with a display transfer, then draws that texture over the
+screen with the alpha test enabled (GreaterThan, reference 7). RGB8 has no
+alpha channel, so real hardware samples alpha as 1 and the test passes. On
+Android both renderers store RGB8 surfaces as RGBA8 (Vulkan: B8G8R8 is not
+usable as a color attachment; OpenGL ES: the RGB8 tuple is GL_RGBA8), so the
+accelerated transfer leaves the scene's alpha (about 0) in the texture,
+every fragment fails the alpha test, and stale data shows as horizontal
+bands.
+
+- Vulkan: when an RGB8 or RGB565 surface is backed by R8G8B8A8, its sampling
+  view uses an a=ONE component swizzle. The Mip0 (framebuffer) view is no
+  longer aliased to it; it is created on demand with the identity mapping.
+- OpenGL: when RGB8 uses the GL_RGBA8 tuple (OpenGL ES), the texture gets
+  GL_TEXTURE_SWIZZLE_A = GL_ONE. Desktop OpenGL uses GL_RGB8 and is
+  unchanged.
+- Moon Chronicles only: ValidateByReinterpretation also skips revalidation
+  when the dirty owner differs in tiled/linear layout, as it already does
+  for a stride mismatch. Otherwise the game's final framebuffer is
+  revalidated from a stale linear buffer every frame, a GPU readback that
+  held it to 26 fps on an Adreno 740.
+
+Tested on an AYN Thor (Adreno 740, Android 13): the first room of Episode 1
+renders correctly on Vulkan and OpenGL ES, at full speed on Vulkan.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/video_core/gpu.cpp                        |  5 ++++
+ src/video_core/rasterizer_cache/moonfix.h     | 20 ++++++++++++++++
+ .../rasterizer_cache/rasterizer_cache.h       |  9 ++++++-
+ .../renderer_opengl/gl_texture_runtime.cpp    | 24 +++++++++++++++----
+ .../renderer_vulkan/vk_texture_runtime.cpp    | 21 ++++++++++++++--
+ .../renderer_vulkan/vk_texture_runtime.h      |  6 ++++-
+ 6 files changed, 76 insertions(+), 9 deletions(-)
+ create mode 100644 src/video_core/rasterizer_cache/moonfix.h
+
+diff --git a/src/video_core/gpu.cpp b/src/video_core/gpu.cpp
+index f415cec..06deba9 100644
+--- a/src/video_core/gpu.cpp
++++ b/src/video_core/gpu.cpp
+@@ -16,6 +16,7 @@
+ #include "video_core/gpu_impl.h"
+ #include "video_core/pica/pica_core.h"
+ #include "video_core/pica/regs_lcd.h"
++#include "video_core/rasterizer_cache/moonfix.h"
+ #include "video_core/renderer_base.h"
+ #include "video_core/renderer_software/sw_blitter.h"
+ #include "video_core/right_eye_disabler.h"
+@@ -460,6 +461,10 @@ void GPU::ApplyPerProgramSettings(u64 program_ID) {
+         }
+     }
+     impl->rasterizer->SetAccurateMul(use_accurate_mul);
++
++    // Moonfix: Moon Chronicles (USA) only, see moonfix.h.
++    VideoCore::g_skip_layout_mismatch_validation.store(program_ID == 0x000400000012E700ULL,
++                                                       std::memory_order_relaxed);
+ }
+ 
+ void GPU::SubmitCmdList(u32 index) {
+diff --git a/src/video_core/rasterizer_cache/moonfix.h b/src/video_core/rasterizer_cache/moonfix.h
+new file mode 100644
+index 0000000..e7f7ab2
+--- /dev/null
++++ b/src/video_core/rasterizer_cache/moonfix.h
+@@ -0,0 +1,20 @@
++// Licensed under GPLv3 or any later version
++// Refer to the LICENSE.txt file included.
++
++// Moonfix: unofficial per-title workaround, not part of upstream Azahar.
++#pragma once
++
++#include <atomic>
++
++namespace VideoCore {
++
++/// Set per title by GPU::ApplyPerProgramSettings. When true, a surface whose invalid region is
++/// owned by a GPU-modified surface with a different memory layout (tiled vs linear) is not
++/// refreshed through guest memory. This extends the existing stride-mismatch heuristic in
++/// RasterizerCache::ValidateByReinterpretation. Moon Chronicles reuses one VRAM block as a linear
++/// downscale target and then as its tiled final framebuffer every frame; refreshing the
++/// framebuffer from that stale block costs a GPU readback per frame and the game overwrites it
++/// with a full-screen quad anyway.
++inline std::atomic<bool> g_skip_layout_mismatch_validation{false};
++
++} // namespace VideoCore
+diff --git a/src/video_core/rasterizer_cache/rasterizer_cache.h b/src/video_core/rasterizer_cache/rasterizer_cache.h
+index 7313f0d..dbcf1c2 100644
+--- a/src/video_core/rasterizer_cache/rasterizer_cache.h
++++ b/src/video_core/rasterizer_cache/rasterizer_cache.h
+@@ -16,6 +16,7 @@
+ #include "video_core/custom_textures/custom_tex_manager.h"
+ #include "video_core/pica/regs_external.h"
+ #include "video_core/pica/regs_internal.h"
++#include "video_core/rasterizer_cache/moonfix.h"
+ #include "video_core/rasterizer_cache/rasterizer_cache_base.h"
+ #include "video_core/rasterizer_cache/surface_base.h"
+ #include "video_core/renderer_base.h"
+@@ -1356,7 +1357,13 @@ bool RasterizerCache<T>::ValidateByReinterpretation(Surface& surface, SurfacePar
+         return false;
+     }
+ 
+-    return slot_surfaces[it->second].stride != surface.stride;
++    const SurfaceParams& owner = slot_surfaces[it->second];
++    if (owner.stride != surface.stride) {
++        return true;
++    }
++    // Moonfix: optionally treat a tiled/linear layout mismatch the same way (see moonfix.h).
++    return g_skip_layout_mismatch_validation.load(std::memory_order_relaxed) &&
++           owner.is_tiled != surface.is_tiled;
+ }
+ 
+ template <class T>
+diff --git a/src/video_core/renderer_opengl/gl_texture_runtime.cpp b/src/video_core/renderer_opengl/gl_texture_runtime.cpp
+index 5ccfe01..63a2503 100644
+--- a/src/video_core/renderer_opengl/gl_texture_runtime.cpp
++++ b/src/video_core/renderer_opengl/gl_texture_runtime.cpp
+@@ -93,7 +93,8 @@ static constexpr std::array<FormatTuple, 8> CUSTOM_TUPLES = {{
+ }
+ 
+ [[nodiscard]] OGLTexture MakeHandle(GLenum target, u32 width, u32 height, u32 levels, u32 samples,
+-                                    const FormatTuple& tuple, std::string_view debug_name = "") {
++                                    const FormatTuple& tuple, std::string_view debug_name = "",
++                                    bool opaque_alpha = false) {
+     OGLTexture texture{};
+     texture.Create();
+ 
+@@ -111,6 +112,12 @@ static constexpr std::array<FormatTuple, 8> CUSTOM_TUPLES = {{
+     glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+     glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+ 
++    if (opaque_alpha && samples <= 1) {
++        // Moonfix: the guest format has no alpha channel but the backing texture does (RGB8 is
++        // stored as RGBA8 on OpenGL ES), so sampling must return alpha = 1.0 like the hardware.
++        glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, GL_ONE);
++    }
++
+     if (!debug_name.empty()) {
+         glObjectLabel(GL_TEXTURE, texture.handle, debug_name.size(), debug_name.data());
+     }
+@@ -118,6 +125,11 @@ static constexpr std::array<FormatTuple, 8> CUSTOM_TUPLES = {{
+     return texture;
+ }
+ 
++/// Moonfix: true when a surface of this guest format must sample alpha as one.
++[[nodiscard]] bool NeedsOpaqueAlpha(PixelFormat format, const FormatTuple& tuple) {
++    return format == PixelFormat::RGB8 && tuple.internal_format == GL_RGBA8;
++}
++
+ } // Anonymous namespace
+ 
+ TextureRuntime::TextureRuntime(const Driver& driver_, VideoCore::RendererBase& renderer_)
+@@ -387,10 +399,12 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
+     const GLenum target =
+         texture_type == VideoCore::TextureType::CubeMap ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+ 
+-    textures[0] = MakeHandle(target, width, height, levels, 1, tuple, DebugName(false));
++    const bool opaque_alpha = NeedsOpaqueAlpha(pixel_format, tuple);
++    textures[0] =
++        MakeHandle(target, width, height, levels, 1, tuple, DebugName(false), opaque_alpha);
+     if (res_scale != 1) {
+         textures[1] = MakeHandle(target, GetScaledWidth(), GetScaledHeight(), levels, 1, tuple,
+-                                 DebugName(true, false));
++                                 DebugName(true, false), opaque_alpha);
+     }
+ 
+     if (sample_count > 1) {
+@@ -444,7 +458,7 @@ GLuint Surface::CopyHandle() noexcept {
+ 
+     if (!copy_texture.handle) {
+         copy_texture = MakeHandle(GL_TEXTURE_2D, GetScaledWidth(), GetScaledHeight(), levels, 1,
+-                                  tuple, DebugName(true));
++                                  tuple, DebugName(true), NeedsOpaqueAlpha(pixel_format, tuple));
+     }
+ 
+     for (u32 level = 0; level < levels; level++) {
+@@ -647,7 +661,7 @@ void Surface::ScaleUp(u32 new_scale, u8 new_sample_count) {
+     if (res_scale_modified && new_scale > 1) {
+         res_scale = new_scale;
+         textures[1] = MakeHandle(GL_TEXTURE_2D, GetScaledWidth(), GetScaledHeight(), levels, 1,
+-                                 tuple, DebugName(true));
++                                 tuple, DebugName(true), NeedsOpaqueAlpha(pixel_format, tuple));
+         for (u32 level = 0; level < levels; level++) {
+             const VideoCore::TextureBlit blit = {
+                 .src_level = level,
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+index 62c577d..7fda507 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.cpp
+@@ -227,7 +227,7 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
+ 
+     image = vk::Image{unsafe_image};
+ 
+-    const vk::ImageViewCreateInfo view_info = {
++    vk::ImageViewCreateInfo view_info = {
+         .image = image,
+         .viewType = is_cube_map ? vk::ImageViewType::eCube : vk::ImageViewType::e2D,
+         .format = format,
+@@ -239,8 +239,14 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
+             .layerCount = VK_REMAINING_ARRAY_LAYERS,
+         },
+     };
++    const bool swizzle_alpha = opaque_alpha && format == vk::Format::eR8G8B8A8Unorm;
++    if (swizzle_alpha) {
++        // Moonfix: sample alpha as 1.0. The framebuffer (Mip0) view must keep the identity
++        // mapping, so it is not aliased to this view and gets created on demand instead.
++        view_info.components.a = vk::ComponentSwizzle::eOne;
++    }
+     image_views[ViewType::Sample] = instance.GetDevice().createImageView(view_info);
+-    if (levels == 1) {
++    if (levels == 1 && !swizzle_alpha) {
+         image_views[ViewType::Mip0] = image_views[ViewType::Sample];
+     }
+ 
+@@ -782,6 +788,17 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
+ 
+     const vk::Format format = traits.native;
+ 
++    // Moonfix: RGB8 and RGB565 have no alpha channel on the 3DS, so sampling them must return
++    // alpha = 1.0. When they are backed by RGBA8 (always the case for RGB8 here), a blit from an
++    // RGBA8 surface (display transfer) would otherwise leave the source's alpha in the texture.
++    if ((pixel_format == VideoCore::PixelFormat::RGB8 ||
++         pixel_format == VideoCore::PixelFormat::RGB565) &&
++        format == vk::Format::eR8G8B8A8Unorm) {
++        for (auto& handle : handles) {
++            handle.opaque_alpha = true;
++        }
++    }
++
+     ASSERT_MSG(format != vk::Format::eUndefined && levels >= 1,
+                "Image allocation parameters are invalid");
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_texture_runtime.h b/src/video_core/renderer_vulkan/vk_texture_runtime.h
+index b10fd4d..184b079 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_runtime.h
++++ b/src/video_core/renderer_vulkan/vk_texture_runtime.h
+@@ -56,7 +56,7 @@ struct Handle {
+     Handle(Handle&& other) noexcept
+         : instance(other.instance), allocation(std::exchange(other.allocation, VK_NULL_HANDLE)),
+           image(std::exchange(other.image, VK_NULL_HANDLE)),
+-          image_views(std::exchange(other.image_views, {})),
++          image_views(std::exchange(other.image_views, {})), opaque_alpha(other.opaque_alpha),
+           framebuffer(std::exchange(other.framebuffer, VK_NULL_HANDLE)),
+           width(std::exchange(other.width, 0)), height(std::exchange(other.height, 0)),
+           levels(std::exchange(other.levels, 0)), layers(std::exchange(other.layers, 0)) {}
+@@ -70,6 +70,7 @@ struct Handle {
+         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
+         image = std::exchange(other.image, VK_NULL_HANDLE);
+         image_views = std::exchange(other.image_views, {});
++        opaque_alpha = other.opaque_alpha;
+         framebuffer = std::exchange(other.framebuffer, VK_NULL_HANDLE);
+         width = std::exchange(other.width, 0);
+         height = std::exchange(other.height, 0);
+@@ -95,6 +96,9 @@ struct Handle {
+     VmaAllocation allocation{VK_NULL_HANDLE};
+     vk::Image image{VK_NULL_HANDLE};
+     std::array<vk::ImageView, ViewType::Max> image_views{};
++    /// Moonfix: the guest format has no alpha channel but the backing image does (e.g. RGB8
++    /// stored as RGBA8), so the sampling view must read alpha as one, like the real hardware.
++    bool opaque_alpha{false};
+     vk::Framebuffer framebuffer{VK_NULL_HANDLE};
+     u32 width{};
+     u32 height{};
+-- 
+2.53.0
+
